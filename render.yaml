@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: trackmate-pwa
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: HEARTBEAT_TIMEOUT_MS
+        value: 15000
+      - key: CHECK_INTERVAL_MS
+        value: 3000
+      - key: VAPID_SUBJECT
+        value: mailto:admin@trackmate.local
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false

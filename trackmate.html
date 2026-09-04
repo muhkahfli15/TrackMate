@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#0f172a">
+  <meta name="description" content="TrackMate PWA untuk pemantauan keselamatan berbasis izin.">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icon.svg">
+  <title>TrackMate - Consent-based Safety</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- PeerJS for WebRTC -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+
+  <style>
+    * { -webkit-tap-highlight-color: transparent; }
+    body { background-color: #f1f5f9; font-family: 'Inter', sans-serif; }
+    .fade-in { animation: fadeIn 0.3s ease-in-out; }
+    @keyframes fadeIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+  </style>
+</head>
+<body class="antialiased min-h-screen flex justify-center w-full">
+
+  <div id="root" class="w-full max-w-md bg-white shadow-2xl relative overflow-hidden flex flex-col min-h-screen"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    const HEARTBEAT_INTERVAL_MS = 2000;
+    const HEARTBEAT_TIMEOUT_MS = 8000;
+    const HEARTBEAT_API_INTERVAL_MS = 5000;
+    const MONITOR_ID_STORAGE_KEY = 'trackmate_monitor_id';
+
+    const generateId = () => Math.random().toString(36).substring(2, 6).toUpperCase();
+    const generateMonitorId = () => `MON-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
+
+    const canUseNotifications = () => 'Notification' in window;
+
+    function getOrCreateMonitorId() {
+      const existingId = localStorage.getItem(MONITOR_ID_STORAGE_KEY);
+      if (existingId) return existingId;
+
+      const monitorId = generateMonitorId();
+      localStorage.setItem(MONITOR_ID_STORAGE_KEY, monitorId);
+      return monitorId;
+    }
+
+    function urlBase64ToUint8Array(base64String) {
+      const padding = '='.repeat((4 - base64String.length % 4) % 4);
+      const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+      const rawData = window.atob(base64);
+      const outputArray = new Uint8Array(rawData.length);
+
+      for (let i = 0; i < rawData.length; ++i) {
+        outputArray[i] = rawData.charCodeAt(i);
+      }
+
+      return outputArray;
+    }
+
+    async function postJson(url, body) {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+
+      if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+      return response.json().catch(() => ({}));
+    }
+
+    async function showLocalNotification(title, options = {}) {
+      if (!canUseNotifications() || Notification.permission !== 'granted') return;
+
+      if ('serviceWorker' in navigator) {
+        const registration = await navigator.serviceWorker.ready;
+        registration.showNotification(title, {
+          badge: './icon.svg',
+          icon: './icon.svg',
+          tag: 'trackmate-safety',
+          renotify: true,
+          ...options
+        });
+        return;
+      }
+
+      new Notification(title, options);
+    }
+
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch((err) => {
+          console.warn('Service worker registration failed:', err);
+        });
+      });
+    }
+
+    function App() {
+      const [role, setRole] = useState(null);
+      const [peer, setPeer] = useState(null);
+      const [peerId, setPeerId] = useState(null);
+
+      useEffect(() => {
+        if (role) {
+          // Buat Peer dengan ID pendek jika User B, atau random jika User A
+          const customId = role === 'tracked' ? generateId() : null;
+          const newPeer = customId ? new Peer(customId) : new Peer();
+          
+          newPeer.on('open', (id) => {
+            setPeerId(id);
+          });
+          
+          newPeer.on('error', (err) => {
+             console.error("PeerJS Error:", err);
+             alert("Koneksi gagal: " + err.type);
+          });
+
+          setPeer(newPeer);
+          
+          return () => {
+             newPeer.destroy();
+          }
+        }
+      }, [role]);
+
+      if (!role) {
+        return <LoginScreen setRole={setRole} />;
+      }
+      
+      return role === 'monitor' ? 
+        <MonitorDashboard peer={peer} /> : 
+        <TrackedDashboard peer={peer} peerId={peerId} />;
+    }
+
+    function LoginScreen({ setRole }) {
+      return (
+        <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-6 text-white fade-in">
+          <div className="w-full p-8 rounded-3xl shadow-2xl border border-slate-700 bg-slate-800">
+            <div className="flex justify-center mb-6">
+              <i className="fa-solid fa-shield-halved text-6xl text-emerald-400"></i>
+            </div>
+            <h1 className="text-3xl font-bold text-center mb-2">TrackMate</h1>
+            <p className="text-slate-400 text-center mb-8 text-sm">Realtime Consent-based Safety</p>
+            
+            <div className="space-y-4">
+              <button onClick={() => setRole('monitor')} className="w-full bg-blue-600 hover:bg-blue-500 text-white p-4 rounded-xl font-medium transition-all flex items-center justify-center gap-3">
+                <i className="fa-solid fa-eye text-xl"></i>
+                Login as User A (Pemantau)
+              </button>
+              
+              <button onClick={() => setRole('tracked')} className="w-full bg-emerald-600 hover:bg-emerald-500 text-white p-4 rounded-xl font-medium transition-all flex items-center justify-center gap-3">
+                <i className="fa-solid fa-tower-broadcast text-xl"></i>
+                Login as User B (Dipantau)
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function MonitorDashboard({ peer }) {
+      const [targetId, setTargetId] = useState('');
+      const [conn, setConn] = useState(null);
+      const [trackedUser, setTrackedUser] = useState({});
+      const [alerts, setAlerts] = useState([]);
+      const [mediaSession, setMediaSession] = useState(null);
+      const [lastHeartbeat, setLastHeartbeat] = useState(null);
+      const [heartbeatLost, setHeartbeatLost] = useState(false);
+      const [notificationPermission, setNotificationPermission] = useState(
+        canUseNotifications() ? Notification.permission : 'unsupported'
+      );
+      const [pushStatus, setPushStatus] = useState('idle');
+      
+      const videoRef = useRef(null);
+      const lastHeartbeatRef = useRef(null);
+      const heartbeatNotifiedRef = useRef(false);
+      const monitorIdRef = useRef(getOrCreateMonitorId());
+
+      const syncPushWatch = useCallback(async (targetPeerId) => {
+        if (!canUseNotifications() || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+          setPushStatus('unsupported');
+          return;
+        }
+
+        if (Notification.permission !== 'granted') {
+          setPushStatus('permission-needed');
+          return;
+        }
+
+        try {
+          setPushStatus('syncing');
+          const config = await fetch('./api/push/public-key').then((response) => response.json());
+          const registration = await navigator.serviceWorker.ready;
+          let subscription = await registration.pushManager.getSubscription();
+
+          if (!subscription) {
+            subscription = await registration.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey: urlBase64ToUint8Array(config.publicKey)
+            });
+          }
+
+          await postJson('./api/push/subscribe', {
+            monitorId: monitorIdRef.current,
+            targetId: targetPeerId || null,
+            subscription
+          });
+
+          setPushStatus(targetPeerId ? 'watching' : 'ready');
+        } catch (err) {
+          console.error('Push subscription failed:', err);
+          setPushStatus('failed');
+        }
+      }, []);
+
+      const requestNotificationPermission = async () => {
+        if (!canUseNotifications()) return;
+        const permission = await Notification.requestPermission();
+        setNotificationPermission(permission);
+        if (permission === 'granted') {
+          await syncPushWatch(conn?.peer || targetId.trim().toUpperCase() || null);
+        }
+      };
+
+      const pushAlert = useCallback((alertPayload) => {
+        setAlerts(prev => [alertPayload, ...prev].slice(0, 5));
+      }, []);
+
+      const connect = () => {
+         const cleanTargetId = targetId.trim().toUpperCase();
+         if (!peer || !cleanTargetId) return;
+
+         const connection = peer.connect(cleanTargetId);
+         
+         connection.on('open', () => {
+            setConn(connection);
+            setHeartbeatLost(false);
+            lastHeartbeatRef.current = Date.now();
+            setLastHeartbeat(lastHeartbeatRef.current);
+            syncPushWatch(cleanTargetId);
+         });
+         
+         connection.on('data', (data) => {
+            if (data.type === 'STATUS') {
+               const receivedAt = Date.now();
+               lastHeartbeatRef.current = receivedAt;
+               heartbeatNotifiedRef.current = false;
+               setHeartbeatLost(false);
+               setLastHeartbeat(receivedAt);
+               setTrackedUser({ ...data.payload, online: true });
+            } else if (data.type === 'ALERT') {
+               pushAlert(data.payload);
+               if (data.payload.type === 'SOS') {
+                  showLocalNotification('TrackMate SOS', { body: data.payload.message });
+               }
+            } else if (data.type === 'MEDIA_RESPONSE') {
+               setMediaSession(prev => ({...prev, status: data.payload.status}));
+               if (data.payload.status === 'rejected' || data.payload.status === 'ended') {
+                  if (videoRef.current) videoRef.current.srcObject = null;
+               }
+            }
+         });
+
+         connection.on('close', () => {
+            setHeartbeatLost(true);
+            setTrackedUser(prev => ({ ...prev, online: false }));
+         });
+
+         connection.on('error', () => {
+            setHeartbeatLost(true);
+            setTrackedUser(prev => ({ ...prev, online: false }));
+         });
+      };
+
+      useEffect(() => {
+         if (!peer) return;
+         peer.on('call', (call) => {
+            call.answer(); // Terima tanpa mengirim stream balik
+            call.on('stream', (remoteStream) => {
+               if (videoRef.current) {
+                  videoRef.current.srcObject = remoteStream;
+               }
+            });
+            call.on('close', () => {
+               if (videoRef.current) videoRef.current.srcObject = null;
+               setMediaSession(prev => prev ? {...prev, status: 'ended'} : null);
+            });
+         });
+      }, [peer]);
+
+      useEffect(() => {
+         if (!conn) return;
+
+         const interval = setInterval(() => {
+            if (!lastHeartbeatRef.current) return;
+
+            const isExpired = Date.now() - lastHeartbeatRef.current > HEARTBEAT_TIMEOUT_MS;
+            if (isExpired) {
+               setHeartbeatLost(true);
+               setTrackedUser(prev => ({ ...prev, online: false }));
+
+               if (!heartbeatNotifiedRef.current) {
+                  heartbeatNotifiedRef.current = true;
+                  const alertPayload = {
+                     type: 'Heartbeat',
+                     message: 'User B tidak mengirim heartbeat. Periksa perangkat User B.',
+                     timestamp: Date.now()
+                  };
+                  pushAlert(alertPayload);
+                  showLocalNotification('TrackMate Heartbeat Lost', { body: alertPayload.message });
+               }
+            }
+         }, 1000);
+
+         return () => clearInterval(interval);
+      }, [conn, pushAlert]);
+      
+      const requestMedia = (type) => {
+        setMediaSession({ type: type, status: 'pending', timestamp: Date.now() });
+        if (conn?.open) conn.send({ type: 'REQUEST_MEDIA', payload: type });
+      };
+
+      const endMediaSession = () => {
+        if (conn?.open) conn.send({ type: 'END_MEDIA' });
+        setMediaSession(prev => prev ? { ...prev, status: 'ended' } : null);
+        if (videoRef.current) videoRef.current.srcObject = null;
+      };
+
+      if (!conn) {
+         return (
+            <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6 fade-in">
+               <div className="w-full bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                  <h2 className="text-xl font-bold mb-4 text-center">Hubungkan ke User B</h2>
+                  <p className="text-sm text-slate-500 mb-6 text-center">Masukkan ID Unik yang muncul di layar User B.</p>
+                  <input 
+                     type="text" 
+                     placeholder="Contoh: A1B2" 
+                     className="w-full p-4 text-center text-2xl font-bold uppercase tracking-widest bg-slate-100 rounded-xl mb-4 border-2 border-transparent focus:border-blue-500 outline-none"
+                     value={targetId}
+                     onChange={(e) => setTargetId(e.target.value)}
+                     maxLength={4}
+                  />
+                  <button onClick={connect} className="w-full bg-blue-600 hover:bg-blue-500 text-white p-4 rounded-xl font-bold transition-colors">
+                     Hubungkan
+                  </button>
+                  {canUseNotifications() && notificationPermission !== 'granted' && (
+                    <button onClick={requestNotificationPermission} className="w-full mt-3 bg-slate-100 hover:bg-slate-200 text-slate-700 p-3 rounded-xl font-bold transition-colors flex items-center justify-center gap-2">
+                      <i className="fa-solid fa-bell"></i>
+                      Aktifkan Notifikasi
+                    </button>
+                  )}
+                  {pushStatus === 'failed' && (
+                    <p className="text-xs text-red-600 text-center mt-3">Push belum aktif. Jalankan lewat server TrackMate.</p>
+                  )}
+               </div>
+            </div>
+         );
+      }
+
+      const isSharingLocation = trackedUser?.locationShared;
+      const isOnline = trackedUser?.online && !heartbeatLost;
+      const heartbeatAge = lastHeartbeat ? Math.round((Date.now() - lastHeartbeat) / 1000) : null;
+      const hasValidLocation =
+        isSharingLocation &&
+        Number.isFinite(trackedUser?.lat) &&
+        Number.isFinite(trackedUser?.lng);
+
+      return (
+        <div className="flex flex-col h-full bg-slate-50 overflow-y-auto pb-20 fade-in min-h-screen">
+          <div className="bg-blue-600 text-white p-5 pt-8 shadow-md rounded-b-3xl sticky top-0 z-10">
+            <h2 className="text-xl font-bold flex items-center gap-2">
+              <i className="fa-solid fa-eye"></i> Dashboard Pemantau
+            </h2>
+            <div className="flex items-center justify-between mt-3">
+               <div className="flex items-center gap-2 text-sm bg-blue-700/50 p-2 rounded-lg inline-flex">
+                 <div className={`w-3 h-3 rounded-full ${isOnline ? 'bg-green-400' : 'bg-red-400'}`}></div>
+                 <span>User B {isOnline ? 'Terhubung' : 'Terputus'}</span>
+               </div>
+               <span className="text-xs opacity-70">ID: {conn.peer}</span>
+            </div>
+          </div>
+
+          <div className="p-5 space-y-5">
+            <div className={`p-4 rounded-2xl border shadow-sm ${isOnline ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-700'}`}>
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <i className={`fa-solid ${isOnline ? 'fa-heart-pulse' : 'fa-heart-crack'} text-xl`}></i>
+                  <div>
+                    <p className="font-bold text-sm">Heartbeat User B</p>
+                    <p className="text-xs opacity-80">
+                      {isOnline ? `Aktif, sinyal terakhir ${heartbeatAge ?? 0} detik lalu` : 'Sinyal terhenti. Periksa perangkat User B.'}
+                    </p>
+                  </div>
+                </div>
+                {canUseNotifications() && notificationPermission !== 'granted' && (
+                  <button onClick={requestNotificationPermission} className="shrink-0 bg-white/80 hover:bg-white px-3 py-2 rounded-lg text-xs font-bold border border-current/20">
+                    <i className="fa-solid fa-bell"></i>
+                  </button>
+                )}
+              </div>
+              <p className="text-xs mt-3 opacity-80">
+                Push: {
+                  pushStatus === 'watching' ? 'siap kirim notifikasi ke perangkat ini' :
+                  pushStatus === 'ready' ? 'aktif, menunggu koneksi User B' :
+                  pushStatus === 'syncing' ? 'menyiapkan notifikasi' :
+                  pushStatus === 'failed' ? 'belum tersambung ke server push' :
+                  pushStatus === 'unsupported' ? 'tidak didukung browser ini' :
+                  notificationPermission === 'granted' ? 'izin aktif' : 'belum diaktifkan'
+                }
+              </p>
+            </div>
+
+            {/* Alerts */}
+            {alerts.length > 0 && (
+              <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-xl shadow-sm">
+                <h3 className="font-bold text-red-700 flex items-center gap-2 mb-3">
+                  <i className="fa-solid fa-triangle-exclamation"></i> Peringatan Terbaru
+                </h3>
+                {alerts.map((a, i) => (
+                  <div key={i} className="text-sm text-red-600 bg-white p-3 rounded-lg mb-2 shadow-sm border border-red-100">
+                    <span className="font-bold uppercase text-xs px-2 py-1 bg-red-100 rounded-md mr-2">{a.type}</span> 
+                    <span className="font-medium">{a.message}</span>
+                    <div className="text-xs text-slate-500 mt-1"><i className="fa-regular fa-clock"></i> {new Date(a.timestamp).toLocaleTimeString()}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Location Card */}
+            <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
+              <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                <i className="fa-solid fa-location-dot text-blue-500"></i> Lokasi Terkini
+              </h3>
+              {hasValidLocation ? (
+                <div>
+                  <div className="bg-slate-100 h-48 rounded-xl flex items-center justify-center overflow-hidden relative mb-3 border border-slate-200">
+                    <iframe 
+                      width="100%" height="100%" frameBorder="0" scrolling="no" 
+                      src={`https://www.openstreetmap.org/export/embed.html?bbox=${trackedUser.lng-0.005},${trackedUser.lat-0.005},${trackedUser.lng+0.005},${trackedUser.lat+0.005}&layer=mapnik&marker=${trackedUser.lat},${trackedUser.lng}`}
+                      className="absolute inset-0 pointer-events-none"
+                    ></iframe>
+                  </div>
+                  <p className="text-xs text-slate-500 font-mono">Lat: {trackedUser.lat.toFixed(5)}, Lng: {trackedUser.lng.toFixed(5)}</p>
+                  <p className="text-xs text-slate-500 mt-1">Update: {trackedUser.lastUpdated ? new Date(trackedUser.lastUpdated).toLocaleTimeString() : '-'}</p>
+                </div>
+              ) : (
+                <div className="bg-slate-50 p-6 rounded-xl flex flex-col items-center justify-center text-slate-400 border border-dashed border-slate-300">
+                  <i className="fa-solid fa-eye-slash text-3xl mb-2"></i>
+                  <p className="text-sm">Lokasi tidak dibagikan</p>
+                </div>
+              )}
+            </div>
+
+            {/* Media Requests */}
+            <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
+              <h3 className="font-bold text-slate-800 mb-4 text-sm">Akses Sensor (Consent Required)</h3>
+              
+              <div className={mediaSession?.status === 'active' ? 'block mb-4' : 'hidden'}>
+                  <video ref={videoRef} autoPlay playsInline muted={false} className="w-full bg-black rounded-xl aspect-video object-cover"></video>
+              </div>
+
+              {mediaSession?.status === 'active' ? (
+                <div className="bg-slate-900 rounded-xl p-4 flex flex-col items-center text-white">
+                   <p className="text-sm font-bold mb-3 text-emerald-400">Sesi {mediaSession.type === 'camera' ? 'Kamera' : 'Audio'} Aktif</p>
+                   <button onClick={endMediaSession} className="w-full bg-red-500 hover:bg-red-600 text-white px-5 py-2.5 rounded-lg text-sm font-bold flex justify-center items-center gap-2 transition-colors">
+                     <i className="fa-solid fa-circle-stop"></i> Akhiri Sesi
+                   </button>
+                </div>
+              ) : mediaSession?.status === 'pending' ? (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 flex flex-col items-center text-amber-700 text-center">
+                  <i className="fa-solid fa-hourglass-half animate-pulse text-2xl mb-2"></i>
+                  <span className="font-bold text-sm">Menunggu persetujuan User B...</span>
+                  <button onClick={endMediaSession} className="text-xs underline mt-3 text-amber-800 hover:text-amber-900">Batalkan</button>
+                </div>
+              ) : (
+                <div>
+                  {mediaSession?.status === 'rejected' && (
+                     <div className="mb-3 text-xs text-red-600 bg-red-50 p-2 rounded text-center font-bold">
+                        Akses ditolak oleh User B.
+                     </div>
+                  )}
+                  <div className="flex gap-3">
+                    <button onClick={() => requestMedia('camera')} className="flex-1 bg-blue-50 hover:bg-blue-100 text-blue-700 p-4 rounded-xl flex flex-col items-center justify-center gap-2 border border-blue-100 transition-colors">
+                      <i className="fa-solid fa-video text-xl"></i>
+                      <span className="text-xs font-bold">Request Camera</span>
+                    </button>
+                    <button onClick={() => requestMedia('audio')} className="flex-1 bg-purple-50 hover:bg-purple-100 text-purple-700 p-4 rounded-xl flex flex-col items-center justify-center gap-2 border border-purple-100 transition-colors">
+                      <i className="fa-solid fa-microphone text-xl"></i>
+                      <span className="text-xs font-bold">Request Audio</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function TrackedDashboard({ peer, peerId }) {
+      const [conn, setConn] = useState(null);
+      const [locationShared, setLocationShared] = useState(false);
+      const [coords, setCoords] = useState(null);
+      const [toast, setToast] = useState(null);
+      const [mediaRequest, setMediaRequest] = useState(null);
+      const [activeMedia, setActiveMedia] = useState(null);
+      
+      const mediaStreamRef = useRef(null);
+      const currentCallRef = useRef(null);
+      const connRef = useRef(null);
+      const lastApiHeartbeatRef = useRef(0);
+
+      const showToast = (message) => {
+        setToast(message);
+        setTimeout(() => setToast(null), 3000);
+      };
+
+      const stopMedia = useCallback(() => {
+         if (mediaStreamRef.current) {
+            mediaStreamRef.current.getTracks().forEach(t => t.stop());
+            mediaStreamRef.current = null;
+         }
+         if (currentCallRef.current) {
+            currentCallRef.current.close();
+            currentCallRef.current = null;
+         }
+         setActiveMedia(null);
+         setMediaRequest(null);
+         if (connRef.current?.open) {
+            connRef.current.send({ type: 'MEDIA_RESPONSE', payload: { status: 'ended' } });
+         }
+      }, []);
+
+      useEffect(() => {
+         if (!peer) return;
+
+         const handleConnection = (connection) => {
+            connRef.current = connection;
+            setConn(connection);
+
+            connection.on('data', (data) => {
+               if (data.type === 'REQUEST_MEDIA') {
+                  setMediaRequest(data.payload);
+               } else if (data.type === 'END_MEDIA') {
+                  stopMedia();
+               }
+            });
+            connection.on('close', () => {
+               connRef.current = null;
+               setConn(null);
+               stopMedia();
+            });
+         };
+
+         peer.on('connection', handleConnection);
+      }, [peer, stopMedia]);
+
+      useEffect(() => {
+         if (!conn) return;
+         const interval = setInterval(() => {
+            if (!conn.open) return;
+            const now = Date.now();
+            conn.send({
+               type: 'STATUS',
+               payload: {
+                  online: true,
+                  locationShared,
+                  lat: coords?.lat,
+                  lng: coords?.lng,
+                  lastUpdated: coords ? now : null
+               }
+            });
+
+            if (peerId && now - lastApiHeartbeatRef.current > HEARTBEAT_API_INTERVAL_MS) {
+              lastApiHeartbeatRef.current = now;
+              postJson('./api/heartbeat', {
+                peerId,
+                connectedTo: conn.peer,
+                locationShared,
+                lat: coords?.lat,
+                lng: coords?.lng,
+                sentAt: now
+              }).catch((err) => console.warn('Backend heartbeat failed:', err));
+            }
+         }, HEARTBEAT_INTERVAL_MS);
+         return () => clearInterval(interval);
+      }, [conn, locationShared, coords, peerId]);
+
+      useEffect(() => {
+        let watchId;
+        if (locationShared) {
+          if (navigator.geolocation) {
+            watchId = navigator.geolocation.watchPosition(
+              (pos) => setCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+              (err) => { 
+                setLocationShared(false);
+                showToast("Akses lokasi ditolak browser.");
+              },
+              { enableHighAccuracy: true }
+            );
+          }
+        } else {
+          setCoords(null);
+        }
+        return () => { if (watchId) navigator.geolocation.clearWatch(watchId); };
+      }, [locationShared]);
+
+      const handleSOS = () => {
+         if (conn?.open) {
+            conn.send({
+               type: 'ALERT',
+               payload: { type: 'SOS', message: 'USER B MENEKAN TOMBOL SOS!', timestamp: Date.now() }
+            });
+            showToast("Sinyal SOS dikirim!");
+         } else {
+            showToast("Belum terhubung ke Pemantau.");
+         }
+      };
+
+      const handleCheckIn = () => {
+         if (conn?.open) {
+            conn.send({
+               type: 'ALERT',
+               payload: { type: 'Check-in', message: 'User B melapor dalam keadaan aman.', timestamp: Date.now() }
+            });
+            showToast("Check-in berhasil dikirim.");
+         } else {
+            showToast("Belum terhubung ke Pemantau.");
+         }
+      };
+      
+      const respondToMedia = async (accept) => {
+         if (!accept) {
+            setMediaRequest(null);
+            if (connRef.current?.open) {
+               connRef.current.send({ type: 'MEDIA_RESPONSE', payload: { status: 'rejected' } });
+            }
+            return;
+         }
+         
+         try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+               video: mediaRequest === 'camera',
+               audio: mediaRequest === 'audio'
+            });
+            mediaStreamRef.current = stream;
+            setActiveMedia(mediaRequest);
+            setMediaRequest(null);
+            
+            if (connRef.current?.open) {
+               connRef.current.send({ type: 'MEDIA_RESPONSE', payload: { status: 'active' } });
+               const call = peer.call(connRef.current.peer, stream);
+               currentCallRef.current = call;
+            }
+         } catch (err) {
+            console.error(err);
+            showToast("Gagal mengakses sensor.");
+            if (connRef.current?.open) {
+               connRef.current.send({ type: 'MEDIA_RESPONSE', payload: { status: 'rejected' } });
+            }
+            setMediaRequest(null);
+         }
+      };
+
+      if (!peerId) {
+         return <div className="min-h-screen bg-slate-900 flex items-center justify-center text-white">Generating ID...</div>
+      }
+
+      return (
+        <div className="flex flex-col h-full bg-slate-50 overflow-y-auto pb-20 relative fade-in min-h-screen">
+          
+          {(locationShared || activeMedia) && (
+            <div className="sticky top-0 z-40 bg-slate-900 text-white p-2.5 text-xs font-bold flex justify-center gap-5 shadow-lg">
+              {locationShared && <span className="flex items-center gap-1.5"><i className="fa-solid fa-location-dot"></i> Location Active</span>}
+              {activeMedia === 'camera' && <span className="flex items-center gap-1.5 text-red-400 animate-pulse"><i className="fa-solid fa-video"></i> Camera Active</span>}
+              {activeMedia === 'audio' && <span className="flex items-center gap-1.5 text-red-400 animate-pulse"><i className="fa-solid fa-microphone"></i> Mic Active</span>}
+            </div>
+          )}
+
+          <div className={`p-6 pt-8 text-white rounded-b-3xl shadow-md transition-colors duration-500 ${activeMedia || locationShared ? 'bg-emerald-700' : 'bg-emerald-500'}`}>
+            <h2 className="text-2xl font-bold flex items-center gap-2">
+              <i className="fa-solid fa-shield-halved"></i> Mode Aman (User B)
+            </h2>
+            <div className="mt-4 bg-black/20 p-3 rounded-xl flex items-center justify-between">
+               <div>
+                  <p className="text-xs opacity-80 uppercase tracking-wider font-bold">ID Unik Anda:</p>
+                  <p className="text-2xl font-black tracking-widest">{peerId}</p>
+               </div>
+               <div className={`text-xs font-bold px-3 py-1.5 rounded-full ${conn ? 'bg-green-400 text-green-900' : 'bg-white/20 text-white'}`}>
+                  {conn ? 'TERHUBUNG' : 'MENUNGGU'}
+               </div>
+            </div>
+          </div>
+
+          <div className="p-5 space-y-5">
+            <button onClick={handleSOS} className="w-full bg-red-500 hover:bg-red-600 text-white font-black text-2xl py-10 rounded-[2rem] shadow-xl shadow-red-500/30 flex flex-col items-center justify-center gap-3 transition-transform active:scale-95">
+              <i className="fa-solid fa-triangle-exclamation text-4xl"></i>
+              KIRIM SOS
+            </button>
+
+            <button onClick={handleCheckIn} className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold text-lg py-5 rounded-2xl shadow-md flex items-center justify-center gap-3 transition-transform active:scale-95">
+              <i className="fa-solid fa-circle-check text-2xl"></i>
+              Saya Aman (Check-in)
+            </button>
+
+            <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <div className={`p-3.5 rounded-xl ${locationShared ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-400'}`}>
+                  <i className="fa-solid fa-location-dot text-2xl"></i>
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-800 text-base">Bagikan Lokasi</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {locationShared ? 'Lokasi dikirim realtime' : 'Pembaruan dihentikan'}
+                  </p>
+                </div>
+              </div>
+              
+              <div onClick={() => setLocationShared(!locationShared)} className={`w-14 h-8 flex items-center rounded-full p-1 cursor-pointer transition-colors ${locationShared ? 'bg-blue-500' : 'bg-slate-300'}`}>
+                <div className={`bg-white w-6 h-6 rounded-full shadow-md transform transition-transform ${locationShared ? 'translate-x-6' : 'translate-x-0'}`}></div>
+              </div>
+            </div>
+            
+            {activeMedia && (
+              <div className="bg-red-50 border border-red-200 p-5 rounded-2xl shadow-sm fade-in">
+                <h3 className="font-bold text-red-700 flex items-center gap-2 mb-2">
+                  <i className="fa-solid fa-triangle-exclamation"></i> Berbagi Media Aktif
+                </h3>
+                <p className="text-sm text-red-600 mb-4 font-medium">
+                  Pemantau sedang terhubung ke {activeMedia === 'camera' ? 'Kamera' : 'Mikrofon'} Anda.
+                </p>
+                <button onClick={() => stopMedia()} className="w-full bg-red-600 hover:bg-red-700 text-white py-3 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md">
+                  <i className="fa-solid fa-circle-stop"></i> Hentikan Sekarang
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Modal Permintaan Media */}
+          {mediaRequest && !activeMedia && (
+            <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-6 fade-in">
+              <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl">
+                <div className="bg-amber-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-amber-600">
+                  <i className={`fa-solid ${mediaRequest === 'camera' ? 'fa-video' : 'fa-microphone'} text-3xl`}></i>
+                </div>
+                <h3 className="text-xl font-bold text-center text-slate-800 mb-2">Permintaan Akses</h3>
+                <p className="text-center text-slate-600 text-sm mb-6">
+                  Pemantau meminta izin untuk mengakses <strong>{mediaRequest === 'camera' ? 'Kamera Video' : 'Mikrofon'}</strong> Anda secara realtime.
+                </p>
+                
+                <div className="space-y-3">
+                  <button onClick={() => respondToMedia(true)} className="w-full bg-emerald-500 hover:bg-emerald-600 text-white py-3.5 rounded-xl font-bold text-base shadow-md">
+                    Izinkan {mediaRequest === 'camera' ? 'Kamera' : 'Audio'}
+                  </button>
+                  <button onClick={() => respondToMedia(false)} className="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 py-3 rounded-xl font-bold">
+                    Tolak Akses
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Toast Notifikasi */}
+          {toast && (
+            <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 bg-slate-800 text-white px-6 py-3 rounded-full shadow-xl z-50 text-sm font-bold flex items-center gap-2 w-max max-w-[90%] fade-in">
+              <i className="fa-solid fa-circle-check text-emerald-400"></i>
+              <span className="truncate">{toast}</span>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>

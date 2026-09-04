@@ -1,0 +1,19 @@
+{
+  "name": "TrackMate",
+  "short_name": "TrackMate",
+  "description": "Pemantauan keselamatan berbasis izin dengan heartbeat, lokasi, kamera, dan mikrofon.",
+  "start_url": "./trackmate.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f1f5f9",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

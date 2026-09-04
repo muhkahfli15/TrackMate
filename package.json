@@ -1,0 +1,13 @@
+{
+  "name": "trackmate-pwa",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TrackMate PWA prototype with consent-based WebRTC monitoring and backend heartbeat push alerts.",
+  "scripts": {
+    "start": "node server.js",
+    "vapid": "node -e \"console.log(require('web-push').generateVAPIDKeys())\""
+  },
+  "dependencies": {
+    "web-push": "^3.6.7"
+  }
+}
